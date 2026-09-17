@@ -59,5 +59,8 @@ jobs:
         if: always()
         with:
           name: checkov-azure-security-report
-          path: infra/checkov-results.sarif
+          path: |
+            checkov-results.sarif
+            infra/checkov-results.sarif
+          if-no-files-found: ignore
           retention-days: 14
