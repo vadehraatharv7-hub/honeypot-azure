@@ -9,24 +9,24 @@ resource "azurerm_virtual_network" "vnet" {
   address_space       = ["10.0.0.0/16"]
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
-
 }
+
 # Subnet inside the VNet
 resource "azurerm_subnet" "subnet" {
   name                 = "subnet-internal"
   resource_group_name  = azurerm_resource_group.rg.name
   virtual_network_name = azurerm_virtual_network.vnet.name
   address_prefixes     = ["10.0.1.0/24"]
-
 }
-#Dedicated Monitoring subnet
+
+# Dedicated Monitoring subnet
 resource "azurerm_subnet" "subnet_monitoring" {
   name                 = "subnet-monitoring"
   resource_group_name  = azurerm_resource_group.rg.name
   virtual_network_name = azurerm_virtual_network.vnet.name
   address_prefixes     = ["10.0.2.0/24"]
-
 }
+
 # 3. Network Security Group (NSG) with Decoy Port 
 resource "azurerm_network_security_group" "nsg" {
   name                = "nsg-honeypot-firewall"
@@ -43,7 +43,6 @@ resource "azurerm_network_security_group" "nsg" {
     destination_port_range     = "22"
     source_address_prefix      = "*"
     destination_address_prefix = "*"
-
   }
   security_rule {
     name                       = "Allow-Admin-SSH"
@@ -56,6 +55,36 @@ resource "azurerm_network_security_group" "nsg" {
     source_address_prefix      = var.admin_public_ip
     destination_address_prefix = "*"
   }
+
+  # --- NEW OUTBOUND RULES (LATERAL MOVEMENT PREVENTION) ---
+
+  # 1. ALLOW Honeypot to send logs to the Monitoring VM
+  security_rule {
+    name                       = "Allow-Outbound-To-Monitoring"
+    priority                   = 200
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "8080"
+    source_address_prefix      = "10.0.1.0/24" # Honeypot Subnet
+    destination_address_prefix = "10.0.2.4"    # Monitoring VM Private IP
+  }
+
+  # 2. DENY Honeypot from talking to anything else on the internal network
+  security_rule {
+    name                       = "Deny-Outbound-VNet"
+    priority                   = 210
+    direction                  = "Outbound"
+    access                     = "Deny"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefix      = "10.0.1.0/24"
+    destination_address_prefix = "10.0.0.0/16" # Blocks the rest of the VNet
+  }
+
+  
 }
 
 resource "azurerm_network_security_group" "nsg_monitoring" {
@@ -63,8 +92,9 @@ resource "azurerm_network_security_group" "nsg_monitoring" {
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
 
+  # Allow Honeypot to push logs directly to the Go Backend
   security_rule {
-    name                       = "Allow-Loki-Ingestion-From-Honeypot"
+    name                       = "Allow-Backend-Ingestion"
     priority                   = 100
     direction                  = "Inbound"
     access                     = "Allow"
@@ -72,10 +102,9 @@ resource "azurerm_network_security_group" "nsg_monitoring" {
     source_address_prefix      = "10.0.1.0/24"
     source_port_range          = "*"
     destination_address_prefix = "*"
-    destination_port_range     = "3100"
+    destination_port_range     = "8080"
   }
 
-  # Admin SSH Access only
   security_rule {
     name                       = "Allow-Admin-SSH"
     priority                   = 110
@@ -88,45 +117,29 @@ resource "azurerm_network_security_group" "nsg_monitoring" {
     destination_port_range     = "22222"
   }
 
-  # Admin Grafana Web UI Access only
   security_rule {
-    name                       = "Allow-Admin-Grafana"
-    priority                   = 120
+    name                       = "Allow-HTTP-Web"
+    priority                   = 140
     direction                  = "Inbound"
     access                     = "Allow"
     protocol                   = "Tcp"
-    source_address_prefix      = var.admin_public_ip
+    source_address_prefix      = var.admin_public_ip               # var.admin_public_ip # Keeps it locked to your IP
     source_port_range          = "*"
     destination_address_prefix = "*"
-    destination_port_range     = "3000"
+    destination_port_range     = "80"
   }
 
-  # Drop all other inbound traffic
-  security_rule {
-    name                       = "Deny-All-Other-Inbound"
-    priority                   = 4096
-    direction                  = "Inbound"
-    access                     = "Deny"
-    protocol                   = "*"
-    source_address_prefix      = "*"
-    source_port_range          = "*"
-    destination_address_prefix = "*"
-    destination_port_range     = "*"
-  }
 }
-
-
 
 # 4. Public IP and Network Interface (NIC)
 resource "azurerm_public_ip" "pip" {
   name                = "pip-honeypot-vm"
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
-  allocation_method   = "Static"   # Standard SKU requires Static allocation
-  sku                 = "Standard" # Switch from Basic to Standard
+  allocation_method   = "Static"
+  sku                 = "Standard" 
 }
 
-# 3. Public IP and NIC for Monitoring VM
 resource "azurerm_public_ip" "pip_monitoring" {
   name                = "pip-monitoring-vm"
   location            = azurerm_resource_group.rg.location
@@ -146,9 +159,7 @@ resource "azurerm_network_interface" "nic" {
     private_ip_address_allocation = "Dynamic"
     public_ip_address_id          = azurerm_public_ip.pip.id
   }
-
 }
-
 
 resource "azurerm_network_interface" "nic_monitoring" {
   name                = "nic-monitoring"
@@ -164,14 +175,10 @@ resource "azurerm_network_interface" "nic_monitoring" {
   }
 }
 
-
-
 # Associate the NSG to the NIC
-
 resource "azurerm_network_interface_security_group_association" "nsg_asso" {
   network_interface_id      = azurerm_network_interface.nic.id
   network_security_group_id = azurerm_network_security_group.nsg.id
-
 }
 
 resource "azurerm_network_interface_security_group_association" "nsg_asso_monitoring" {
@@ -179,9 +186,7 @@ resource "azurerm_network_interface_security_group_association" "nsg_asso_monito
   network_security_group_id = azurerm_network_security_group.nsg_monitoring.id
 }
 
-
 # Ubuntu B1S Virtual Machine (Honeypot)
-
 resource "azurerm_linux_virtual_machine" "vm" {
   name                = "vm-honeypot"
   location            = azurerm_resource_group.rg.location
@@ -199,7 +204,6 @@ resource "azurerm_linux_virtual_machine" "vm" {
     caching              = "ReadWrite"
     storage_account_type = "Standard_LRS"
   }
-  # Updated to Ubuntu 22.04 LTS (Jammy) for native Python 3.10 support
   source_image_reference {
     publisher = "Canonical"
     offer     = "0001-com-ubuntu-server-jammy"
@@ -207,107 +211,74 @@ resource "azurerm_linux_virtual_machine" "vm" {
     version   = "latest"
   }
 
-
-  # Cloud-init script injected as custom_data for Honeypot VM
   custom_data = base64encode(<<-EOF
     #!/bin/bash
     set -e
 
-    # Step A: Rebind Real SSH to 22222
     sed -i 's/#Port 22/Port 22222/' /etc/ssh/sshd_config
     systemctl restart sshd
 
-    # Step B: Add 1GB Swap (Crucial for B1s to prevent OOM kills during pip builds)
+    # Use dd for 1GB swap creation to prevent Azure kernel issues
     if [ ! -f /swapfile ]; then
-      fallocate -l 1G /swapfile
+      dd if=/dev/zero of=/swapfile bs=1M count=1024
       chmod 600 /swapfile
       mkswap /swapfile
       swapon /swapfile
       echo '/swapfile none swap sw 0 0' >> /etc/fstab
     fi
 
-    # Step C: Install System Dependencies & Add Grafana Repo for Alloy
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
     apt-get install -y software-properties-common iptables-persistent wget curl gpg \
       python3 python3-venv python3-dev git libssl-dev libffi-dev build-essential
 
-    mkdir -p /etc/apt/keyrings/
-    wget -q -O - https://apt.grafana.com/gpg.key | gpg --dearmor | tee /etc/apt/keyrings/grafana.gpg > /dev/null
-    echo "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main" | tee /etc/apt/sources.list.d/grafana.list
-    apt-get update
-    apt-get install -y alloy
-
-    # Step D: Setup Cowrie User & Clone Repository
     id -u cowrie &>/dev/null || useradd -m -s /bin/bash cowrie
     su - cowrie -c "git clone https://github.com/cowrie/cowrie.git /home/cowrie/cowrie"
 
-    # Step E: Setup venv, install packages, initialize, and start Cowrie
     su - cowrie -c "python3 -m venv /home/cowrie/cowrie/cowrie-env"
     su - cowrie -c "/home/cowrie/cowrie/cowrie-env/bin/pip install --upgrade pip setuptools wheel"
     su - cowrie -c "/home/cowrie/cowrie/cowrie-env/bin/pip install -r /home/cowrie/cowrie/requirements.txt"
     su - cowrie -c "/home/cowrie/cowrie/cowrie-env/bin/pip install /home/cowrie/cowrie"
     su - cowrie -c "cd /home/cowrie/cowrie && source cowrie-env/bin/activate && cowrie init && cowrie start"
 
-    # Step F: Configure iptables Decoy Routing (Port 22 -> 2222)
     iptables -t nat -A PREROUTING -p tcp --dport 22 -j REDIRECT --to-port 2222
     netfilter-persistent save
 
-    # Step G: Configure Grafana Alloy Pipeline
-    cat << 'ALLOY_CONFIG' > /etc/alloy/config.alloy
-    local.file_match "cowrie_logs" {
-      path_targets = [{
-        __path__ = "/home/cowrie/cowrie/var/log/cowrie/cowrie.json*",
-        job      = "cowrie",
-      }]
-    }
+    # Deploy Native JSON Forwarder instead of Grafana Alloy
+    cat << 'SCRIPT' > /usr/local/bin/cowrie-forwarder.sh
+    #!/bin/bash
+    tail -n 0 -F /home/cowrie/cowrie/var/log/cowrie/cowrie.json | while read line; do
+      curl -s -X POST http://10.0.2.4:8080/api/ingest/cowrie \
+           -H "Content-Type: application/json" \
+           -d "$line" > /dev/null
+    done
+    SCRIPT
 
-    loki.source.file "cowrie_scraper" {
-      targets    = local.file_match.cowrie_logs.targets
-      forward_to = [loki.process.cowrie_parser.receiver]
-    }
+    chmod +x /usr/local/bin/cowrie-forwarder.sh
 
-    loki.process "cowrie_parser" {
-      stage.json {
-        expressions = {
-          eventid   = "eventid",
-          src_ip    = "src_ip",
-          username  = "username",
-          password  = "password",
-          input     = "input",
-          system    = "system",
-          timestamp = "timestamp",
-        }
-      }
+    cat << 'SERVICE' > /etc/systemd/system/cowrie-forwarder.service
+    [Unit]
+    Description=Cowrie Native JSON Forwarder
+    After=network.target
 
-      stage.labels {
-        values = {
-          eventid = "eventid",
-        }
-      }
+    [Service]
+    Type=simple
+    User=root
+    ExecStart=/usr/local/bin/cowrie-forwarder.sh
+    Restart=always
+    RestartSec=3
 
-      forward_to = [loki.write.internal_loki.receiver]
-    }
+    [Install]
+    WantedBy=multi-user.target
+    SERVICE
 
-    loki.write "internal_loki" {
-      endpoint {
-        url = "http://10.0.2.4:3100/loki/api/v1/push"
-      }
-    }
-    ALLOY_CONFIG
-
-    # Step H: File Permissions & Start Alloy Service
-    usermod -aG cowrie alloy
-    chmod 750 /home/cowrie
-    chmod -R 755 /home/cowrie/cowrie/var/log
-
-    alloy fmt /etc/alloy/config.alloy
-    systemctl enable --now alloy
+    systemctl daemon-reload
+    systemctl enable --now cowrie-forwarder
   EOF
   )
 }
 
-# 4. Monitoring VM with Automated Docker Install
+# 6. Monitoring VM with PM2 and Nginx
 resource "azurerm_linux_virtual_machine" "vm_monitoring" {
   name                = "vm-monitoring"
   location            = azurerm_resource_group.rg.location
@@ -339,370 +310,99 @@ resource "azurerm_linux_virtual_machine" "vm_monitoring" {
     #!/bin/bash
     set -e
 
-    # 1. Rebind real SSH port to 22222
     sed -i 's/#Port 22/Port 22222/' /etc/ssh/sshd_config
     systemctl restart sshd
 
-    # 2. Install Docker & Compose plugin non-interactively
+    # Use dd for 3GB swap to completely eliminate Vite OOM risks
+    if [ ! -f /swapfile ]; then
+      dd if=/dev/zero of=/swapfile bs=1M count=3072
+      chmod 600 /swapfile
+      mkswap /swapfile
+      swapon /swapfile
+      echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    fi
+
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    apt-get install -y ca-certificates curl gnupg lsb-release
+    apt-get install -y ca-certificates curl gnupg lsb-release git nginx wget
 
-    mkdir -p /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+    # Install Go via official tarball (Bypasses unstable Snap daemon in cloud-init)
+    GO_VERSION="1.22.0"
+    wget https://golang.org/dl/go$GO_VERSION.linux-amd64.tar.gz
+    rm -rf /usr/local/go && tar -C /usr/local -xzf go$GO_VERSION.linux-amd64.tar.gz
+    rm go$GO_VERSION.linux-amd64.tar.gz
+    export PATH=$PATH:/usr/local/go/bin
+
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
     apt-get update
-    apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-    usermod -aG docker azureuser
+    apt-get install -y nodejs
+    
+    npm install -g pm2
 
-    # 3. Create Monitoring Directories
-    WORKDIR="/home/azureuser/monitoring"
-    mkdir -p $WORKDIR/grafana/provisioning/datasources
-    mkdir -p $WORKDIR/grafana/provisioning/dashboards
-    mkdir -p $WORKDIR/grafana/dashboards
+    APP_DIR="/home/azureuser/app"
+    REPO_URL="https://github.com/vadehraatharv7-hub/sec_dash.git"
 
-    # 4. Provision Loki Data Source
-    cat << 'DS' > $WORKDIR/grafana/provisioning/datasources/loki.yml
-    apiVersion: 1
-    datasources:
-      - name: Loki
-        type: loki
-        access: proxy
-        url: http://loki:3100
-        isDefault: true
-    DS
+    sudo -u azureuser git clone $REPO_URL $APP_DIR
 
-    # 5. Provision Dashboard Provider
-    cat << 'PROVIDER' > $WORKDIR/grafana/provisioning/dashboards/default.yml
-    apiVersion: 1
-    providers:
-      - name: 'Default'
-        orgId: 1
-        folder: ''
-        type: file
-        disableDeletion: false
-        updateIntervalSeconds: 10
-        options:
-          path: /etc/grafana/dashboards
-    PROVIDER
+    cd $APP_DIR/backend
+    sudo -u azureuser env PATH=$PATH:/usr/local/go/bin go build -o api-server ./cmd/server
+    chmod +x api-server
 
-    # 6. Write Dashboard JSON
-    cat << 'DASHBOARD' > $WORKDIR/grafana/dashboards/honeypot.json
-    {
-      "uid": "cowrie-threat-intel",
-      "title": "Cowrie Honeypot Threat Intel",
-      "tags": ["honeypot", "cowrie", "security"],
-      "timezone": "browser",
-      "schemaVersion": 39,
-      "refresh": "5s",
-      "time": {
-        "from": "now-1h",
-        "to": "now"
-      },
-      "timepicker": {
-        "refresh_intervals": ["5s", "10s", "30s", "1m", "5m"]
-      },
-      "templating": {
-        "list": [
-          {
-            "current": {
-              "selected": true,
-              "text": "Loki",
-              "value": "Loki"
-            },
-            "hide": 0,
-            "includeAll": false,
-            "multi": false,
-            "name": "DS_LOKI",
-            "options": [],
-            "query": "loki",
-            "queryValue": "",
-            "refresh": 1,
-            "regex": "",
-            "skipUrlSync": false,
-            "type": "datasource"
-          }
-        ]
-      },
-      "panels": [
-        {
-          "collapsed": false,
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
-          "id": 100,
-          "title": "Honeypot Telemetry & Attack Velocity",
-          "type": "row"
-        },
-        {
-          "datasource": { "type": "loki", "uid": "$${DS_LOKI}" },
-          "fieldConfig": {
-            "defaults": {
-              "custom": {
-                "drawStyle": "line",
-                "fillOpacity": 15,
-                "gradientMode": "opacity",
-                "lineInterpolation": "smooth",
-                "lineWidth": 2,
-                "showPoints": "never"
-              },
-              "unit": "short"
-            },
-            "overrides": []
-          },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
-          "id": 1,
-          "options": {
-            "legend": { "calcs": ["sum", "lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-            "tooltip": { "mode": "multi", "sort": "desc" }
-          },
-          "targets": [
-            {
-              "datasource": { "type": "loki", "uid": "$${DS_LOKI}" },
-              "editorMode": "code",
-              "expr": "sum by (eventid) (rate({job=\"cowrie\"} [$__interval]))",
-              "queryType": "range",
-              "refId": "A"
-            }
-          ],
-          "title": "Attack Velocity by Event Type",
-          "type": "timeseries"
-        },
-        {
-          "datasource": { "type": "loki", "uid": "$${DS_LOKI}" },
-          "fieldConfig": {
-            "defaults": {
-              "color": { "mode": "thresholds" },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  { "color": "green", "value": null },
-                  { "color": "orange", "value": 5 },
-                  { "color": "red", "value": 20 }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "gridPos": { "h": 8, "w": 4, "x": 12, "y": 1 },
-          "id": 6,
-          "options": {
-            "colorMode": "value",
-            "graphMode": "none",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-            "textMode": "auto"
-          },
-          "targets": [
-            {
-              "datasource": { "type": "loki", "uid": "$${DS_LOKI}" },
-              "editorMode": "code",
-              "expr": "count(sum by (src_ip) (count_over_time({job=\"cowrie\"} | json | src_ip != \"\" [$__range])))",
-              "queryType": "range",
-              "refId": "A"
-            }
-          ],
-          "title": "Distinct Attacker IPs",
-          "type": "stat"
-        },
-        {
-          "datasource": { "type": "loki", "uid": "$${DS_LOKI}" },
-          "fieldConfig": {
-            "defaults": {
-              "color": { "mode": "thresholds" },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  { "color": "green", "value": null },
-                  { "color": "#EAB839", "value": 20 },
-                  { "color": "red", "value": 50 }
-                ]
-              },
-              "unit": "short"
-            },
-            "overrides": []
-          },
-          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 1 },
-          "id": 2,
-          "options": {
-            "displayMode": "gradient",
-            "minVizHeight": 10,
-            "minVizWidth": 0,
-            "namePlacement": "auto",
-            "orientation": "horizontal",
-            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-            "showUnfilled": true,
-            "valueMode": "color"
-          },
-          "targets": [
-            {
-              "datasource": { "type": "loki", "uid": "$${DS_LOKI}" },
-              "editorMode": "code",
-              "expr": "topk(10, sum by (src_ip) (count_over_time({job=\"cowrie\"} | json | src_ip != \"\" [$__range])))",
-              "queryType": "instant",
-              "refId": "A"
-            }
-          ],
-          "title": "Top 10 Attacker IPs",
-          "type": "bargauge"
-        },
-        {
-          "collapsed": false,
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
-          "id": 101,
-          "title": "Credential Harvest Analytics",
-          "type": "row"
-        },
-        {
-          "datasource": { "type": "loki", "uid": "$${DS_LOKI}" },
-          "fieldConfig": {
-            "defaults": {
-              "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": false },
-              "mappings": [],
-              "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }
-            },
-            "overrides": []
-          },
-          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 10 },
-          "id": 3,
-          "options": {
-            "cellHeight": "sm",
-            "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
-            "showHeader": true
-          },
-          "targets": [
-            {
-              "datasource": { "type": "loki", "uid": "$${DS_LOKI}" },
-              "editorMode": "code",
-              "expr": "topk(15, sum by (password) (count_over_time({job=\"cowrie\"} | json | password != \"\" [$__range])))",
-              "queryType": "instant",
-              "refId": "A"
-            }
-          ],
-          "title": "Top Sprayed Passwords",
-          "transformations": [
-            {
-              "id": "sortBy",
-              "options": { "fields": {}, "sort": [{ "desc": true, "field": "Value" }] }
-            },
-            {
-              "id": "organize",
-              "options": {
-                "excludeByName": { "Time": true },
-                "indexByName": {},
-                "renameByName": { "Value": "Attempt Count", "password": "Password" }
-              }
-            }
-          ],
-          "type": "table"
-        },
-        {
-          "datasource": { "type": "loki", "uid": "$${DS_LOKI}" },
-          "fieldConfig": {
-            "defaults": { "color": { "mode": "palette-classic" }, "mappings": [] },
-            "overrides": []
-          },
-          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 10 },
-          "id": 4,
-          "options": {
-            "displayLabels": ["name", "percent"],
-            "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "values": ["value"] },
-            "pieType": "donut",
-            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-            "tooltip": { "mode": "single", "sort": "desc" }
-          },
-          "targets": [
-            {
-              "datasource": { "type": "loki", "uid": "$${DS_LOKI}" },
-              "editorMode": "code",
-              "expr": "topk(8, sum by (username) (count_over_time({job=\"cowrie\"} | json | username != \"\" [$__range])))",
-              "queryType": "instant",
-              "refId": "A"
-            }
-          ],
-          "title": "Targeted Usernames",
-          "type": "piechart"
-        },
-        {
-          "collapsed": false,
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 },
-          "id": 102,
-          "title": "Interactive Shell Audit",
-          "type": "row"
-        },
-        {
-          "datasource": { "type": "loki", "uid": "$${DS_LOKI}" },
-          "gridPos": { "h": 10, "w": 24, "x": 0, "y": 18 },
-          "id": 5,
-          "options": {
-            "dedupStrategy": "none",
-            "enableLogDetails": true,
-            "prettifyLogMessage": false,
-            "showCommonLabels": false,
-            "showLabels": false,
-            "showTime": true,
-            "sortOrder": "Descending",
-            "wrapLogMessage": true
-          },
-          "targets": [
-            {
-              "datasource": { "type": "loki", "uid": "$${DS_LOKI}" },
-              "editorMode": "code",
-              "expr": "{job=\"cowrie\"} | json | eventid =~ \"cowrie.command.*\" | line_format \"src={{.src_ip}} | user={{.username}} | cmd='{{.input}}'\"",
-              "queryType": "range",
-              "refId": "A"
-            }
-          ],
-          "title": "Adversary Executed Commands Stream",
-          "type": "logs"
+    cd $APP_DIR/frontend
+    sudo -u azureuser npm install
+    
+    # Enforce memory cap on Node.js to stop Vite from consuming system memory limits
+    sudo -u azureuser env NODE_OPTIONS="--max-old-space-size=1024" npm run build
+
+    BUILD_DIR="$APP_DIR/frontend/dist"
+    [ ! -d "$BUILD_DIR" ] && BUILD_DIR="$APP_DIR/frontend/build"
+
+    sudo -u azureuser pm2 start $APP_DIR/backend/api-server --name "go-backend"
+    sudo -u azureuser pm2 serve $BUILD_DIR 3000 --name "react-frontend" --spa
+    sudo -u azureuser pm2 save
+
+    env PATH=$PATH:/usr/bin pm2 startup systemd -u azureuser --hp /home/azureuser
+    systemctl enable pm2-azureuser
+
+    # Configure Nginx Reverse Proxy
+    cat << 'NGINX_CONF' > /etc/nginx/sites-available/default
+    server {
+        listen 80 default_server;
+        listen [::]:80 default_server;
+        server_name _;
+
+        # React UI
+        location / {
+            proxy_pass http://127.0.0.1:3000;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection 'upgrade';
+            proxy_set_header Host $host;
+            proxy_cache_bypass $http_upgrade;
         }
-      ]
+
+        # WebSocket Live Stream
+        location /ws {
+            proxy_pass http://127.0.0.1:8080;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_read_timeout 86400;
+        }
+
+        # REST API Endpoints
+        location /api {
+            proxy_pass http://127.0.0.1:8080;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
     }
-    DASHBOARD
+    NGINX_CONF
 
-    # 7. Write Docker Compose File
-    cat << 'COMPOSE' > $WORKDIR/docker-compose.yml
-    services:
-      loki:
-        image: grafana/loki:latest
-        container_name: loki
-        restart: unless-stopped
-        ports:
-          - "10.0.2.4:3100:3100"
-        command: -config.file=/etc/loki/local-config.yaml
-        volumes:
-          - loki-data:/loki
-
-      grafana:
-        image: grafana/grafana:latest
-        container_name: grafana
-        restart: unless-stopped
-        ports:
-          - "3000:3000"
-        environment:
-          - GF_SECURITY_ADMIN_USER=admin
-          - GF_SECURITY_ADMIN_PASSWORD=${var.grafana_admin_password}
-          - GF_USERS_ALLOW_SIGN_UP=false
-        volumes:
-          - grafana-data:/var/lib/grafana
-          - ./grafana/provisioning:/etc/grafana/provisioning
-          - ./grafana/dashboards:/etc/grafana/dashboards
-
-    volumes:
-      loki-data:
-      grafana-data:
-    COMPOSE
-
-    chown -R azureuser:azureuser $WORKDIR
-    sudo fallocate -l 2G /swapfile
-    sudo chmod 600 /swapfile
-    sudo mkswap /swapfile
-    sudo swapon /swapfile
-    # 8. Pull and launch the stack
-    cd $WORKDIR
-    docker compose up -d
+    nginx -t
+    systemctl restart nginx
+    systemctl enable nginx
   EOF
   )
 }
-
