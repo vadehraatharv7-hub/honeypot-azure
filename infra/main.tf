@@ -150,6 +150,7 @@ resource "azurerm_public_ip" "pip_monitoring" {
   sku                 = "Standard"
 }
 
+# checkov:skip=CKV_AZURE_119:Honeypot sensor VM requires direct public IP to capture incoming internet attack traffic
 resource "azurerm_network_interface" "nic" {
   name                = "nic-honeypot"
   location            = azurerm_resource_group.rg.location
@@ -163,6 +164,7 @@ resource "azurerm_network_interface" "nic" {
   }
 }
 
+# checkov:skip=CKV_AZURE_119:Monitoring VM requires direct public IP for SecDash web dashboard access
 resource "azurerm_network_interface" "nic_monitoring" {
   name                = "nic-monitoring"
   location            = azurerm_resource_group.rg.location
@@ -188,7 +190,19 @@ resource "azurerm_network_interface_security_group_association" "nsg_asso_monito
   network_security_group_id = azurerm_network_security_group.nsg_monitoring.id
 }
 
+# Associate NSG to Subnets (Enforces CKV2_AZURE_31)
+resource "azurerm_subnet_network_security_group_association" "subnet_nsg" {
+  subnet_id                 = azurerm_subnet.subnet.id
+  network_security_group_id = azurerm_network_security_group.nsg.id
+}
+
+resource "azurerm_subnet_network_security_group_association" "subnet_monitoring_nsg" {
+  subnet_id                 = azurerm_subnet.subnet_monitoring.id
+  network_security_group_id = azurerm_network_security_group.nsg_monitoring.id
+}
+
 # Ubuntu B1S Virtual Machine (Honeypot)
+# checkov:skip=CKV_AZURE_50:Virtual machine extensions are intentionally not installed; custom_data cloud-init is used
 resource "azurerm_linux_virtual_machine" "vm" {
   name                = "vm-honeypot"
   location            = azurerm_resource_group.rg.location
@@ -281,6 +295,7 @@ resource "azurerm_linux_virtual_machine" "vm" {
 }
 
 # 6. Monitoring VM with PM2 and Nginx
+# checkov:skip=CKV_AZURE_50:Virtual machine extensions are intentionally not installed; custom_data cloud-init is used
 resource "azurerm_linux_virtual_machine" "vm_monitoring" {
   name                = "vm-monitoring"
   location            = azurerm_resource_group.rg.location

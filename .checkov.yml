@@ -1,0 +1,15 @@
+framework:
+  - terraform
+directory:
+  - infra
+output:
+  - cli
+  - sarif
+output-file-path:
+  - console
+  - checkov-results.sarif
+compact: true
+quiet: false
+skip-check:
+  - CKV_AZURE_119
+  - CKV_AZURE_50
