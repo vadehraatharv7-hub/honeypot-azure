@@ -1,0 +1,63 @@
+name: Terraform Security & Compliance Scan
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  terraform-security-scan:
+    name: Checkov & TFLint Static Security Analysis
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.5"
+
+      - name: Terraform Format Check
+        run: |
+          terraform fmt -check -diff
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: Initialize TFLint
+        run: |
+          tflint --init
+
+      - name: Run TFLint (Azure Ruleset)
+        run: |
+          tflint -f compact
+
+      - name: Run Checkov Security Scanner (NSG & Storage Hardening)
+        uses: bridgecrewio/checkov-action@master
+        with:
+          framework: terraform
+          directory: infra
+          output_format: cli,sarif
+          output_file_path: console,checkov-results.sarif
+          soft_fail: true
+
+      - name: Upload Checkov Security Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: checkov-azure-security-report
+          path: infra/checkov-results.sarif
+          retention-days: 14

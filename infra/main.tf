@@ -33,6 +33,8 @@ resource "azurerm_network_security_group" "nsg" {
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
 
+  # checkov:skip=CKV_AZURE_9:Port 22 is deliberately exposed to the internet as a Cowrie honeypot decoy sensor
+  # checkov:skip=CKV_AZURE_10:Port 22 is open for decoy honeypot attack capture
   security_rule {
     name                       = "allow-decoy-port"
     priority                   = 100
@@ -84,7 +86,7 @@ resource "azurerm_network_security_group" "nsg" {
     destination_address_prefix = "10.0.0.0/16" # Blocks the rest of the VNet
   }
 
-  
+
 }
 
 resource "azurerm_network_security_group" "nsg_monitoring" {
@@ -123,7 +125,7 @@ resource "azurerm_network_security_group" "nsg_monitoring" {
     direction                  = "Inbound"
     access                     = "Allow"
     protocol                   = "Tcp"
-    source_address_prefix      = var.admin_public_ip               # var.admin_public_ip # Keeps it locked to your IP
+    source_address_prefix      = var.admin_public_ip # var.admin_public_ip # Keeps it locked to your IP
     source_port_range          = "*"
     destination_address_prefix = "*"
     destination_port_range     = "80"
@@ -137,7 +139,7 @@ resource "azurerm_public_ip" "pip" {
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
   allocation_method   = "Static"
-  sku                 = "Standard" 
+  sku                 = "Standard"
 }
 
 resource "azurerm_public_ip" "pip_monitoring" {
